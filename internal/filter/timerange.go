@@ -5,14 +5,14 @@ import (
 	"time"
 )
 
-// TimeRange represents an inclusive time window for log filtering.
+// TimeRange represents an optional start/end window for log filtering.
 type TimeRange struct {
-	From time.Time
-	To   time.Time
+	From *time.Time
+	To   *time.Time
 }
 
-// ParseTimeRange parses two RFC3339 timestamp strings into a TimeRange.
-// Either bound may be empty to indicate an open-ended range.
+// ParseTimeRange parses optional from/to RFC3339 timestamp strings into a TimeRange.
+// Either or both may be empty strings to indicate open bounds.
 func ParseTimeRange(from, to string) (TimeRange, error) {
 	var tr TimeRange
 
@@ -21,7 +21,7 @@ func ParseTimeRange(from, to string) (TimeRange, error) {
 		if err != nil {
 			return tr, fmt.Errorf("invalid --from timestamp %q: %w", from, err)
 		}
-		tr.From = t
+		tr.From = &t
 	}
 
 	if to != "" {
@@ -29,29 +29,29 @@ func ParseTimeRange(from, to string) (TimeRange, error) {
 		if err != nil {
 			return tr, fmt.Errorf("invalid --to timestamp %q: %w", to, err)
 		}
-		tr.To = t
+		tr.To = &t
 	}
 
-	if !tr.From.IsZero() && !tr.To.IsZero() && tr.To.Before(tr.From) {
+	if tr.From != nil && tr.To != nil && tr.To.Before(*tr.From) {
 		return tr, fmt.Errorf("--to (%s) must not be before --from (%s)", to, from)
 	}
 
 	return tr, nil
 }
 
-// Contains reports whether the given timestamp falls within the time range.
-// A zero From or To bound is treated as unbounded.
-func (tr TimeRange) Contains(ts time.Time) bool {
-	if !tr.From.IsZero() && ts.Before(tr.From) {
+// Contains reports whether the given time falls within the TimeRange.
+// Open bounds are treated as unbounded.
+func (tr TimeRange) Contains(t time.Time) bool {
+	if tr.From != nil && t.Before(*tr.From) {
 		return false
 	}
-	if !tr.To.IsZero() && ts.After(tr.To) {
+	if tr.To != nil && t.After(*tr.To) {
 		return false
 	}
 	return true
 }
 
-// IsZero reports whether neither bound has been set.
+// IsZero reports whether the TimeRange has no bounds set.
 func (tr TimeRange) IsZero() bool {
-	return tr.From.IsZero() && tr.To.IsZero()
+	return tr.From == nil && tr.To == nil
 }
