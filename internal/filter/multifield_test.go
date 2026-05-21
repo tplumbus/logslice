@@ -69,3 +69,23 @@ func TestMultiFieldFilter_MatchesLine_MissingKey(t *testing.T) {
 		t.Error("line missing the queried key should not match")
 	}
 }
+
+func TestMultiFieldFilter_MatchesLine_NumericValue(t *testing.T) {
+	mf, _ := NewMultiFieldFilter([]string{"status=200"})
+	tests := []struct {
+		name    string
+		line    string
+		wantMatch bool
+	}{
+		{"matches numeric 200", `{"status":200,"msg":"ok"}`, true},
+		{"no match numeric 404", `{"status":404,"msg":"not found"}`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mf.MatchesLine(tc.line)
+			if got != tc.wantMatch {
+				t.Errorf("MatchesLine(%q) = %v, want %v", tc.line, got, tc.wantMatch)
+			}
+		})
+	}
+}
