@@ -1,84 +1,59 @@
 package filter
 
 import (
-	"bufio"
 	"encoding/json"
-	"io"
-	"time"
+	"fmt"
 )
 
-// Pipeline applies a TimeRange and zero or more FieldQueries to a stream of
-// JSON log lines, writing matching lines to dst.
+// LineMatcher is satisfied by any filter that can evaluate a single JSON log line.
+type LineMatcher interface {
+	MatchesLine(line string) bool
+}
+
+// Pipeline combines a TimeRange gate with an optional LineMatcher to filter
+// structured JSON log lines.
 type Pipeline struct {
-	TimeRange    TimeRange
-	FieldQueries []FieldQuery
-	TimestampKey string // JSON key to read the timestamp from (default: "time")
+	tr      *TimeRange
+	filter  LineMatcher
 }
 
-// NewPipeline creates a Pipeline with sensible defaults.
-func NewPipeline(tr TimeRange, queries []FieldQuery) *Pipeline {
-	return &Pipeline{
-		TimeRange:    tr,
-		FieldQueries: queries,
-		TimestampKey: "time",
-	}
+// NewPipeline creates a Pipeline. filter may be nil (time-range only).
+func NewPipeline(tr *TimeRange, filter LineMatcher) *Pipeline {
+	return &Pipeline{tr: tr, filter: filter}
 }
 
-// Run reads lines from src and writes matching lines to dst.
-// It returns the number of lines written and any read/write error.
-func (p *Pipeline) Run(src io.Reader, dst io.Writer) (int, error) {
-	scanner := bufio.NewScanner(src)
-	written := 0
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
+// Run iterates over lines, applies the time-range and field filter, and calls
+// emit for every line that passes both gates. Processing stops on the first
+// error returned by emit.
+func (p *Pipeline) Run(lines []string, emit func(string) error) error {
+	for _, line := range lines {
+		if line == "" {
 			continue
 		}
 
-		if !p.matchesTimeRange(line) {
+		var raw map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			// skip non-JSON lines silently
 			continue
 		}
 
-		if !p.matchesFields(line) {
+		if p.tr != nil {
+			ts, ok := extractTimestamp(raw)
+			if !ok {
+				continue
+			}
+			if !p.tr.Contains(ts) {
+				continue
+			}
+		}
+
+		if p.filter != nil && !p.filter.MatchesLine(line) {
 			continue
 		}
 
-		if _, err := dst.Write(append(line, '\n')); err != nil {
-			return written, err
-		}
-		written++
-	}
-
-	return written, scanner.Err()
-}
-
-func (p *Pipeline) matchesTimeRange(line []byte) bool {
-	var record map[string]json.RawMessage
-	if err := json.Unmarshal(line, &record); err != nil {
-		return false
-	}
-	raw, ok := record[p.TimestampKey]
-	if !ok {
-		return false
-	}
-	var tsStr string
-	if err := json.Unmarshal(raw, &tsStr); err != nil {
-		return false
-	}
-	ts, err := time.Parse(time.RFC3339Nano, tsStr)
-	if err != nil {
-		return false
-	}
-	return p.TimeRange.Contains(ts)
-}
-
-func (p *Pipeline) matchesFields(line []byte) bool {
-	for _, fq := range p.FieldQueries {
-		ok, err := fq.MatchesLine(line)
-		if err != nil || !ok {
-			return false
+		if err := emit(line); err != nil {
+			return fmt.Errorf("pipeline emit: %w", err)
 		}
 	}
-	return true
+	return nil
 }
