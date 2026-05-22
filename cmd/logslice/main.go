@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/yourorg/logslice/internal/filter"
 	"github.com/yourorg/logslice/internal/input"
@@ -12,55 +13,89 @@ import (
 )
 
 func main() {
-	var (
-		from     = flag.String("from", "", "start of time range (RFC3339), inclusive")
-		to       = flag.String("to", "", "end of time range (RFC3339), inclusive")
-		field    = flag.String("field", "", "field filter in key=value format")
-		outPath  = flag.String("out", "", "output file path (default: stdout)")
-		timestampKey = flag.String("ts-key", "ts", "JSON key used for the timestamp field")
-	)
+	from := flag.String("from", "", "start of time range (RFC3339)")
+	to := flag.String("to", "", "end of time range (RFC3339)")
+	fields := flag.String("fields", "", "comma-separated field=value filters")
+	regexField := flag.String("regex-field", "", "field name for regex filter")
+	regexPat := flag.String("regex", "", "regex pattern for --regex-field")
+	invert := flag.Bool("invert", false, "invert the combined filter result")
+	limit := flag.Int("limit", 0, "max number of output lines (0 = unlimited)")
+	outFile := flag.String("out", "", "output file path (default: stdout)")
 	flag.Parse()
 
-	// Build pipeline
-	var opts []filter.Option
+	files := flag.Args()
+
+	reader, err := input.NewLineReader(files)
+	if err != nil {
+		log.Fatalf("input error: %v", err)
+	}
+	lines, err := reader.ReadAll()
+	if err != nil {
+		log.Fatalf("read error: %v", err)
+	}
+
+	var filters []filter.Filter
 
 	if *from != "" || *to != "" {
-		tr, err := filter.ParseTimeRange(*from, *to, *timestampKey)
+		tr, err := filter.ParseTimeRange(*from, *to)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: invalid time range: %v\n", err)
-			os.Exit(1)
+			log.Fatalf("time range: %v", err)
 		}
-		opts = append(opts, filter.WithTimeRange(tr))
+		filters = append(filters, tr)
 	}
 
-	if *field != "" {
-		fq, err := filter.ParseFieldQuery(*field)
+	if *fields != "" {
+		mf, err := filter.NewMultiFieldFilter(strings.Split(*fields, ","))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: invalid field query: %v\n", err)
-			os.Exit(1)
+			log.Fatalf("field filter: %v", err)
 		}
-		opts = append(opts, filter.WithFieldQuery(fq))
+		filters = append(filters, mf)
 	}
 
-	pipeline := filter.NewPipeline(opts...)
-
-	// Set up input
-	lr, err := input.NewLineReader(flag.Args())
-	if err != nil {
-		log.Fatalf("error opening input: %v", err)
+	if *regexField != "" || *regexPat != "" {
+		rf, err := filter.NewRegexFilter(*regexField, *regexPat)
+		if err != nil {
+			log.Fatalf("regex filter: %v", err)
+		}
+		filters = append(filters, rf)
 	}
 
-	// Set up output
-	w, err := output.NewWriter(*outPath)
+	if *limit > 0 {
+		lf, err := filter.NewLimitFilter(*limit)
+		if err != nil {
+			log.Fatalf("limit filter: %v", err)
+		}
+		filters = append(filters, lf)
+	}
+
+	var combined filter.Filter
+	if len(filters) == 0 {
+		combined = filter.PassAll{}
+	} else {
+		combined = filter.NewMultiFilter(filters)
+	}
+	if *invert {
+		combined, err = filter.NewInvertFilter(combined)
+		if err != nil {
+			log.Fatalf("invert filter: %v", err)
+		}
+	}
+
+	pipeline := filter.NewPipeline(lines, combined)
+	results, err := pipeline.Run()
 	if err != nil {
-		log.Fatalf("error opening output: %v", err)
+		log.Fatalf("pipeline: %v", err)
+	}
+
+	w, err := output.NewWriter(*outFile)
+	if err != nil {
+		log.Fatalf("output: %v", err)
 	}
 	defer w.Close()
 
-	// Run
-	for line := range pipeline.Run(lr.Lines()) {
+	for _, line := range results {
 		if err := w.WriteLine(line); err != nil {
-			log.Fatalf("error writing output: %v", err)
+			fmt.Fprintf(os.Stderr, "write error: %v\n", err)
 		}
 	}
 }
